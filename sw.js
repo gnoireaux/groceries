@@ -1,7 +1,7 @@
 /* Groceries service worker — offline after first load.
    Navigation = network-first (picks up updates when online, cache when offline).
    Other same-origin assets = cache-first. */
-const CACHE = 'groceries-v1';
+const CACHE = 'groceries-v2';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
