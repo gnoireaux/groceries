@@ -453,7 +453,7 @@ function dedupCatalog(j){
   j.list=lines;
   return j;
 }
-function save(){try{localStorage.setItem(LS,JSON.stringify(S));}catch(e){}}
+function save(){try{localStorage.setItem(LS,JSON.stringify(S));}catch(e){} try{syncOnSave();}catch(e){}}
 function newId(){return S.nextId++;}
 
 /* ---------- totals ---------- */
@@ -887,10 +887,90 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 function round(n){return Math.round(n*1000)/1000;}
 function fmtQty(q){return Number.isInteger(q)?String(q):String(q).replace('.',',');}
 
+/* ---------- Firebase catalog sync (two-way, catalog only; last-write-wins) ----------
+   Catalog (item defs) syncs Mac<->phone via Firestore doc catalogs/main.
+   List (S.list) stays per-device. SDK loaded dynamically + gated to the real
+   deploy origin so jsdom tests (example.org) never touch the network. App works
+   offline from localStorage regardless — sync is a pure enhancement. */
+const firebaseConfig={
+  apiKey:"AIzaSyAfNjn_A_fys1gJV-3wdkK-t8Enhi4xyDo",
+  authDomain:"groceries-d91a9.firebaseapp.com",
+  projectId:"groceries-d91a9",
+  storageBucket:"groceries-d91a9.firebasestorage.app",
+  messagingSenderId:"31871902081",
+  appId:"1:31871902081:web:71cddf60d5cde9701d8880"
+};
+const DEVICE_ID=(()=>{try{let d=localStorage.getItem('courses_device');
+  if(!d){d=Math.random().toString(36).slice(2)+Date.now().toString(36); localStorage.setItem('courses_device',d);}
+  return d;}catch(e){return 'dev';}})();
+let syncCatRef=null, syncReady=false, applyingRemote=false, pushTimer=null;
+let lastCatalogJson=JSON.stringify(S.catalog);   // to detect catalog-only changes in save()
+let lastKnownTs=0;                                // newest updatedAt seen or written (echo/LWW guard)
+
+function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');
+  s.src=src; s.onload=res; s.onerror=()=>rej(new Error('load '+src)); document.head.appendChild(s);});}
+
+async function initSync(){
+  if(!/(github\.io|localhost|127\.0\.0\.1)/.test(location.hostname)) return;  // deploy/dev only → tests stay offline
+  try{
+    const B='https://www.gstatic.com/firebasejs/10.12.5/';
+    await loadScript(B+'firebase-app-compat.js');
+    await loadScript(B+'firebase-auth-compat.js');
+    await loadScript(B+'firebase-firestore-compat.js');
+    firebase.initializeApp(firebaseConfig);
+    syncCatRef=firebase.firestore().collection('catalogs').doc('main');
+    await firebase.auth().signInAnonymously();
+    syncReady=true;
+    syncCatRef.onSnapshot(applyRemoteCatalog, e=>console.warn('[sync] snapshot',e));
+  }catch(e){ console.warn('[sync] disabled:', (e&&e.message)||e); }
+}
+
+function applyRemoteCatalog(snap){
+  const d=snap.data();
+  if(!d||!Array.isArray(d.items)){ pushCatalog(); return; }   // remote empty → seed from this device
+  const ts=d.updatedAt||0;
+  if(ts<=lastKnownTs) return;                                 // not newer (covers our own echo)
+  lastKnownTs=ts;
+  applyingRemote=true;
+  S.catalog=d.items;
+  reconcileList();                                            // re-link list lines after catalog swap
+  lastCatalogJson=JSON.stringify(S.catalog);
+  save(); render();
+  applyingRemote=false;
+}
+
+// remote catalog replaced local → relink list lines (id-spaces differ per device): by id, else by name
+function reconcileList(){
+  const byId=new Map(S.catalog.map(c=>[c.id,c]));
+  const byNorm=new Map(S.catalog.map(c=>[norm(c.n),c]));
+  for(const l of S.list){
+    let c=(l.catId!=null)?byId.get(l.catId):null;
+    if(!c) c=byNorm.get(norm(l.n));
+    if(c){ l.catId=c.id; l.n=c.n; l.p=c.p; l.unit=c.unit; }
+  }
+}
+
+function pushCatalog(){
+  if(!syncReady||!syncCatRef) return;
+  const ts=Date.now(); lastKnownTs=ts;
+  syncCatRef.set({items:S.catalog, updatedAt:ts, updatedBy:DEVICE_ID})
+    .catch(e=>console.warn('[sync] push',e));
+}
+
+// from save(): push only when catalog actually changed (skip list-only saves), debounced
+function syncOnSave(){
+  if(applyingRemote||!syncReady) return;
+  const j=JSON.stringify(S.catalog);
+  if(j===lastCatalogJson) return;
+  lastCatalogJson=j;
+  clearTimeout(pushTimer); pushTimer=setTimeout(pushCatalog,1200);
+}
+
 /* ---------- boot ---------- */
 function render(){renderHeader(); renderList();}
 applyTheme();
 render();
+initSync();
 
 /* ---------- service worker: offline after first load (needs https/localhost) ---------- */
 if('serviceWorker' in navigator){
